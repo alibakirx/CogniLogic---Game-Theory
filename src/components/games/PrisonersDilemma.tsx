@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { useGame } from '@/context/GameContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Play, Shield, AlertTriangle, HelpCircle, ChevronDown, Award } from 'lucide-react';
+import { ArrowLeft, Play, Shield, AlertTriangle, HelpCircle, ChevronDown, Award, Users, RefreshCw } from 'lucide-react';
 import { translations } from '@/utils/translations';
 
 interface PrisonersDilemmaProps {
@@ -11,97 +11,258 @@ interface PrisonersDilemmaProps {
 }
 
 type Choice = 'Silent' | 'Betray';
-type Outcome = 'both_silent' | 'you_betray' | 'partner_betrays' | 'both_betray';
+type BotStrategy = 'tft' | 'grudger' | 'always_defect' | 'always_coop' | 'detective' | 'random';
+
+interface MatchRound {
+  userMove: Choice;
+  botMove: Choice;
+  userPts: number;
+  botPts: number;
+}
 
 export const PrisonersDilemma: React.FC<PrisonersDilemmaProps> = ({ onBack }) => {
   const { recordDecision, completeGame, addXP, language } = useGame();
   const t = translations[language];
-  const [choice, setChoice] = useState<Choice | null>(null);
-  const [partnerChoice, setPartnerChoice] = useState<Choice | null>(null);
-  const [isPlaying, setIsPlaying] = useState<boolean>(true);
-  const [hoveredCell, setHoveredCell] = useState<{ row: Choice; col: Choice } | null>(null);
+
+  // Game states
+  const [opponent, setOpponent] = useState<BotStrategy | null>(null);
+  const [round, setRound] = useState<number>(1);
+  const [userHistory, setUserHistory] = useState<Choice[]>([]);
+  const [botHistory, setBotHistory] = useState<Choice[]>([]);
+  const [userScore, setUserScore] = useState<number>(0);
+  const [botScore, setBotScore] = useState<number>(0);
+  const [roundsLog, setRoundsLog] = useState<MatchRound[]>([]);
+
+  const [isPlaying, setIsPlaying] = useState<boolean>(true); // true = match in progress
+  const [showLeaderboard, setShowLeaderboard] = useState<boolean>(false);
+  const [leaderboardData, setLeaderboardData] = useState<{ name: string; score: number; isUser: boolean; color: string }[]>([]);
+
   const [activeAccordion, setActiveAccordion] = useState<string | null>(null);
   const [theoryRead, setTheoryRead] = useState<string[]>([]);
+  const [lastRoundResult, setLastRoundResult] = useState<{ title: string; desc: string; userPts: number; botPts: number } | null>(null);
 
-  // Interrogation outcome details
-  const getOutcomeDetails = (user: Choice, partner: Choice) => {
-    if (user === 'Silent' && partner === 'Silent') {
-      return {
-        id: 'both_silent' as Outcome,
-        title: t.pd.outcomes.solidarity_t,
-        desc: t.pd.outcomes.solidarity_d,
-        userSentence: `1 ${t.pd.sentences.year}`,
-        partnerSentence: `1 ${t.pd.sentences.year}`,
-        verdict: t.pd.outcomes.solidarity_v,
-        cooperative: true,
-      };
-    } else if (user === 'Betray' && partner === 'Silent') {
-      return {
-        id: 'you_betray' as Outcome,
-        title: t.pd.outcomes.temptation_t,
-        desc: t.pd.outcomes.temptation_d,
-        userSentence: t.pd.sentences.free,
-        partnerSentence: `10 ${t.pd.sentences.years}`,
-        verdict: t.pd.outcomes.temptation_v,
-        cooperative: false,
-      };
-    } else if (user === 'Silent' && partner === 'Betray') {
-      return {
-        id: 'partner_betrays' as Outcome,
-        title: t.pd.outcomes.betrayed_t,
-        desc: t.pd.outcomes.betrayed_d,
-        userSentence: `10 ${t.pd.sentences.years}`,
-        partnerSentence: t.pd.sentences.free,
-        verdict: t.pd.outcomes.betrayed_v,
-        cooperative: true,
-      };
+  // Bot opponent definitions
+  const botStrategiesList = [
+    { id: 'tft' as BotStrategy, name: t.pd.bots.tft_name, desc: t.pd.bots.tft_desc, icon: '🤝' },
+    { id: 'grudger' as BotStrategy, name: t.pd.bots.grudger_name, desc: t.pd.bots.grudger_desc, icon: '😠' },
+    { id: 'always_defect' as BotStrategy, name: t.pd.bots.always_defect_name, desc: t.pd.bots.always_defect_desc, icon: '😈' },
+    { id: 'always_coop' as BotStrategy, name: t.pd.bots.always_coop_name, desc: t.pd.bots.always_coop_desc, icon: '😇' },
+    { id: 'detective' as BotStrategy, name: t.pd.bots.detective_name, desc: t.pd.bots.detective_desc, icon: '🕵️' },
+    { id: 'random' as BotStrategy, name: t.pd.bots.random_name, desc: t.pd.bots.random_desc, icon: '🎲' },
+  ];
+
+  // Bot logic
+  const getBotChoice = (strategy: BotStrategy, opponentHistory: Choice[], selfHistory: Choice[], currentRound: number): Choice => {
+    if (strategy === 'always_defect') return 'Betray';
+    if (strategy === 'always_coop') return 'Silent';
+    
+    if (strategy === 'random') {
+      return Math.random() < 0.5 ? 'Silent' : 'Betray';
+    }
+
+    if (strategy === 'tft') {
+      if (currentRound === 1) return 'Silent';
+      return opponentHistory[opponentHistory.length - 1]; // Copy opponent's last move
+    }
+
+    if (strategy === 'grudger') {
+      // Cooperates until opponent betrays once; then always betrays
+      const hasOpponentBetrayed = opponentHistory.includes('Betray');
+      return hasOpponentBetrayed ? 'Betray' : 'Silent';
+    }
+
+    if (strategy === 'detective') {
+      // Plays: Cooperate, Defect, Cooperate, Cooperate
+      // If opponent betrays in these 4 rounds, acts like Tit-for-Tat
+      // Else, acts like Always Defect to exploit
+      if (currentRound === 1) return 'Silent';
+      if (currentRound === 2) return 'Betray';
+      if (currentRound === 3) return 'Silent';
+      if (currentRound === 4) return 'Silent';
+
+      const betrayedInFirstFour = opponentHistory.slice(0, 4).includes('Betray');
+      if (betrayedInFirstFour) {
+        return opponentHistory[opponentHistory.length - 1]; // Tit-for-Tat
+      } else {
+        return 'Betray'; // Always Defect
+      }
+    }
+
+    return 'Silent';
+  };
+
+  const handlePlayRound = (userMove: Choice) => {
+    if (!opponent) return;
+
+    const botMove = getBotChoice(opponent, userHistory, botHistory, round);
+
+    // Calculate payoffs
+    let uPts = 0;
+    let bPts = 0;
+    let outcomeTitle = '';
+    let outcomeDesc = '';
+
+    if (userMove === 'Silent' && botMove === 'Silent') {
+      uPts = 3;
+      bPts = 3;
+      outcomeTitle = t.pd.outcomes.solidarity_t;
+      outcomeDesc = t.pd.outcomes.solidarity_d;
+    } else if (userMove === 'Betray' && botMove === 'Silent') {
+      uPts = 5;
+      bPts = 0;
+      outcomeTitle = t.pd.outcomes.temptation_t;
+      outcomeDesc = t.pd.outcomes.temptation_d;
+    } else if (userMove === 'Silent' && botMove === 'Betray') {
+      uPts = 0;
+      bPts = 5;
+      outcomeTitle = t.pd.outcomes.betrayed_t;
+      outcomeDesc = t.pd.outcomes.betrayed_d;
     } else {
-      return {
-        id: 'both_betray' as Outcome,
-        title: t.pd.outcomes.tragedy_t,
-        desc: t.pd.outcomes.tragedy_d,
-        userSentence: `5 ${t.pd.sentences.years}`,
-        partnerSentence: `5 ${t.pd.sentences.years}`,
-        verdict: t.pd.outcomes.tragedy_v,
-        cooperative: false,
-      };
+      uPts = 1;
+      bPts = 1;
+      outcomeTitle = t.pd.outcomes.tragedy_t;
+      outcomeDesc = t.pd.outcomes.tragedy_d;
+    }
+
+    // Update state
+    setUserScore((prev) => prev + uPts);
+    setBotScore((prev) => prev + bPts);
+    setUserHistory((prev) => [...prev, userMove]);
+    setBotHistory((prev) => [...prev, botMove]);
+    
+    const newRoundLog: MatchRound = { userMove, botMove, userPts: uPts, botPts: bPts };
+    setRoundsLog((prev) => [...prev, newRoundLog]);
+    setLastRoundResult({ title: outcomeTitle, desc: outcomeDesc, userPts: uPts, botPts: bPts });
+
+    if (round === 10) {
+      setIsPlaying(false);
+      // Compile final decision details
+      const isCoopMatch = userHistory.filter((h) => h === 'Silent').length >= 5;
+      recordDecision({
+        gameId: 'prisoners_dilemma',
+        choice: language === 'en' ? `Finished match vs ${opponent}` : `${opponent} botuna karşı maç tamamlandı`,
+        outcome: language === 'en' ? `Score: ${userScore + uPts} - ${botScore + bPts}` : `Skor: ${userScore + uPts} - ${botScore + bPts}`,
+        cooperative: isCoopMatch,
+        riskLevel: userHistory.filter((h) => h === 'Betray').length * 1,
+        fairness: userHistory.filter((h) => h === 'Silent').length * 1,
+      });
+      completeGame('prisoners_dilemma');
+    } else {
+      setRound((prev) => prev + 1);
     }
   };
 
-  const handleChoice = (selectedChoice: Choice) => {
-    setChoice(selectedChoice);
-    // Random partner decision with bias to make it interesting
-    const partner = Math.random() < 0.6 ? 'Betray' : 'Silent';
-    setPartnerChoice(partner);
-    setIsPlaying(false);
+  // Axelrod Round-Robin Tournament simulation
+  const runAxelrodTournament = () => {
+    // Strategies list
+    const strategies = ['tft', 'grudger', 'always_defect', 'always_coop', 'detective', 'random', 'user'];
+    
+    // User cooperation probability based on user's actual choices in the 10 rounds
+    const userCoopCount = userHistory.filter(h => h === 'Silent').length;
+    const userCoopProb = userCoopCount / 10;
 
-    const details = getOutcomeDetails(selectedChoice, partner);
-    recordDecision({
-      gameId: 'prisoners_dilemma',
-      choice: selectedChoice,
-      outcome: details.title,
-      cooperative: details.cooperative,
-      riskLevel: selectedChoice === 'Betray' ? 8 : 3,
-      fairness: selectedChoice === 'Silent' ? 9 : 1,
+    const scores: Record<string, number> = {
+      tft: 0,
+      grudger: 0,
+      always_defect: 0,
+      always_coop: 0,
+      detective: 0,
+      random: 0,
+      user: 0,
+    };
+
+    // Play 10 rounds between each pair (including self)
+    strategies.forEach((p1) => {
+      strategies.forEach((p2) => {
+        let p1History: Choice[] = [];
+        let p2History: Choice[] = [];
+        let p1Score = 0;
+        let p2Score = 0;
+
+        for (let r = 1; r <= 10; r++) {
+          // Resolve player 1 move
+          let p1Move: Choice = 'Silent';
+          if (p1 === 'user') {
+            p1Move = Math.random() < userCoopProb ? 'Silent' : 'Betray';
+          } else {
+            p1Move = getBotChoice(p1 as BotStrategy, p2History, p1History, r);
+          }
+
+          // Resolve player 2 move
+          let p2Move: Choice = 'Silent';
+          if (p2 === 'user') {
+            p2Move = Math.random() < userCoopProb ? 'Silent' : 'Betray';
+          } else {
+            p2Move = getBotChoice(p2 as BotStrategy, p1History, p2History, r);
+          }
+
+          // Payoffs
+          if (p1Move === 'Silent' && p2Move === 'Silent') {
+            p1Score += 3; p2Score += 3;
+          } else if (p1Move === 'Betray' && p2Move === 'Silent') {
+            p1Score += 5; p2Score += 0;
+          } else if (p1Move === 'Silent' && p2Move === 'Betray') {
+            p1Score += 0; p2Score += 5;
+          } else {
+            p1Score += 1; p2Score += 1;
+          }
+
+          p1History.push(p1Move);
+          p2History.push(p2Move);
+        }
+
+        scores[p1] += p1Score;
+      });
     });
-    completeGame('prisoners_dilemma');
+
+    // Axelrod average score scaling (average points per round * 165 to get scores in range of ~100 to 500)
+    // There are 7 players in total, so each player plays 7 matches.
+    // Average points per round = total_points / (7 matches * 10 rounds) = total_points / 70.
+    // Let's multiply average points per round by 160 to scale up to 500.
+    const getScaled = (key: string) => {
+      const avgPointsPerRound = scores[key] / 70;
+      return Math.round(avgPointsPerRound * 160);
+    };
+
+    // Construct leaderboard objects matching names and colors of screenshot
+    const leaderboard = [
+      { name: t.pd.bots.tft_name, score: getScaled('tft'), isUser: false, color: 'bg-[#984576] light:bg-[#C26B9C]' }, // Purple
+      { name: t.pd.bots.grudger_name, score: getScaled('grudger'), isUser: false, color: 'bg-[#438B83] light:bg-[#5EA49C]' }, // Teal
+      { name: t.pd.bots.always_defect_name, score: getScaled('always_defect'), isUser: false, color: 'bg-[#8F3E3D] light:bg-[#A95A59]' }, // Crimson
+      { name: t.pd.bots.always_coop_name, score: getScaled('always_coop'), isUser: false, color: 'bg-[#A86438] light:bg-[#C37E52]' }, // Brown
+      { name: t.pd.bots.detective_name, score: getScaled('detective'), isUser: false, color: 'bg-[#555E8D] light:bg-[#6F77A7]' }, // Slate Blue
+      { name: t.pd.bots.random_name, score: getScaled('random'), isUser: false, color: 'bg-[#58784F] light:bg-[#729269]' }, // Green
+      { name: t.pd.user_label, score: getScaled('user'), isUser: true, color: 'bg-primary-main' }, // Brand Blue
+    ];
+
+    // Sort descending by score
+    leaderboard.sort((a, b) => b.score - a.score);
+    setLeaderboardData(leaderboard);
+    setShowLeaderboard(true);
   };
 
-  const resetGame = () => {
-    setChoice(null);
-    setPartnerChoice(null);
+  const resetAll = () => {
+    setOpponent(null);
+    setRound(1);
+    setUserHistory([]);
+    setBotHistory([]);
+    setUserScore(0);
+    setBotScore(0);
+    setRoundsLog([]);
     setIsPlaying(true);
+    setShowLeaderboard(false);
+    setLastRoundResult(null);
   };
 
   const handleReadTheory = (topic: string) => {
     if (!theoryRead.includes(topic)) {
       setTheoryRead((prev) => [...prev, topic]);
-      addXP(20); // +20 XP for reading theory
+      addXP(20);
     }
     setActiveAccordion(activeAccordion === topic ? null : topic);
   };
 
-  const currentOutcome = choice && partnerChoice ? getOutcomeDetails(choice, partnerChoice) : null;
+  const currentBotDetails = botStrategiesList.find((b) => b.id === opponent);
 
   const accordionData = [
     {
@@ -128,7 +289,7 @@ export const PrisonersDilemma: React.FC<PrisonersDilemmaProps> = ({ onBack }) =>
   ];
 
   return (
-    <div className="w-full max-w-5xl mx-auto px-4 py-8">
+    <div className="w-full max-w-6xl mx-auto px-4 py-8">
       {/* Header */}
       <button
         onClick={onBack}
@@ -138,243 +299,331 @@ export const PrisonersDilemma: React.FC<PrisonersDilemmaProps> = ({ onBack }) =>
         {t.pd.back}
       </button>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Play Space */}
-        <div className="lg:col-span-7 space-y-6">
-          <div className="bg-bg-card border border-border-main rounded-2xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
-            {/* Ambient background glow */}
-            <div className="absolute top-0 right-0 w-64 h-64 bg-primary-main/5 rounded-full filter blur-3xl pointer-events-none" />
-
-            <div className="flex justify-between items-start mb-6">
-              <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-primary-main/10 text-primary-main border border-primary-main/20">
-                {t.dashboard.games.pd_title}
-              </span>
-              <span className="text-xs text-text-muted">{t.pd.diff}</span>
-            </div>
-
-            <AnimatePresence mode="wait">
-              {isPlaying ? (
-                <motion.div
-                  key="story"
-                  initial={{ opacity: 0, y: 15 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -15 }}
-                  transition={{ duration: 0.3 }}
-                  className="space-y-6"
-                >
-                  <h2 className="text-2xl font-bold font-outfit">{t.pd.story_title}</h2>
-                  <p className="text-text-muted leading-relaxed">
-                    {t.pd.story_1}
-                  </p>
-                  <p className="text-text-muted leading-relaxed">
-                    {t.pd.story_2}
-                  </p>
-
-                  <div className="pt-4 border-t border-border-main/50 space-y-3">
-                    <p className="text-sm font-semibold text-text-main">{t.pd.choice_prompt}</p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <button
-                        onClick={() => handleChoice('Silent')}
-                        onMouseEnter={() => setHoveredCell({ row: 'Silent', col: 'Silent' })}
-                        onMouseLeave={() => setHoveredCell(null)}
-                        className="flex flex-col items-center justify-center p-5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 hover:border-emerald-500/40 text-emerald-400 font-semibold transition-all group cursor-pointer"
-                      >
-                        <Shield className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform" />
-                        <span>{t.pd.silent_btn}</span>
-                        <span className="text-[10px] text-emerald-500/70 font-normal mt-1">{t.pd.silent_sub}</span>
-                      </button>
-
-                      <button
-                        onClick={() => handleChoice('Betray')}
-                        onMouseEnter={() => setHoveredCell({ row: 'Betray', col: 'Betray' })}
-                        onMouseLeave={() => setHoveredCell(null)}
-                        className="flex flex-col items-center justify-center p-5 rounded-xl border border-red-500/20 bg-red-500/5 hover:bg-red-500/10 hover:border-red-500/40 text-red-400 font-semibold transition-all group cursor-pointer"
-                      >
-                        <AlertTriangle className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform" />
-                        <span>{t.pd.betray_btn}</span>
-                        <span className="text-[10px] text-red-500/70 font-normal mt-1">{t.pd.betray_sub}</span>
-                      </button>
-                    </div>
-                  </div>
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="outcome"
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  className="space-y-6"
-                >
-                  <div className="flex items-center justify-between pb-4 border-b border-border-main/50">
-                    <h3 className="text-xl font-bold font-outfit text-accent-main">
-                      {currentOutcome?.title}
-                    </h3>
-                    <div className="flex flex-col sm:flex-row gap-1 sm:gap-2">
-                      <span className="text-xs bg-slate-800 px-3 py-1 rounded-full border border-slate-700">
-                        {language === 'en' ? 'You chose' : 'Seçiminiz'}: <strong>{choice === 'Silent' ? t.pd.silent_btn : t.pd.betray_btn}</strong>
-                      </span>
-                      <span className="text-xs bg-slate-800 px-3 py-1 rounded-full border border-slate-700">
-                        {language === 'en' ? 'Partner chose' : 'Ortak'}: <strong>{partnerChoice === 'Silent' ? t.pd.silent_btn : t.pd.betray_btn}</strong>
-                      </span>
-                    </div>
-                  </div>
-
-                  <p className="text-text-muted leading-relaxed">{currentOutcome?.desc}</p>
-
-                  {/* Results cards */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="p-4 bg-slate-800/40 light:bg-slate-100 rounded-xl border border-border-main text-center">
-                      <p className="text-xs text-text-muted uppercase tracking-wider font-semibold">
-                        {language === 'en' ? 'Your Sentence' : 'Cezanız'}
-                      </p>
-                      <p className="text-lg font-extrabold text-white dark:text-white light:text-slate-900 mt-1">
-                        {currentOutcome?.userSentence}
-                      </p>
-                    </div>
-                    <div className="p-4 bg-slate-800/40 light:bg-slate-100 rounded-xl border border-border-main text-center">
-                      <p className="text-xs text-text-muted uppercase tracking-wider font-semibold">
-                        {language === 'en' ? "Partner's Sentence" : 'Ortağın Cezası'}
-                      </p>
-                      <p className="text-lg font-extrabold text-white dark:text-white light:text-slate-900 mt-1">
-                        {currentOutcome?.partnerSentence}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="p-4 bg-primary-main/10 border border-primary-main/20 rounded-xl">
-                    <p className="text-xs font-bold text-primary-main flex items-center gap-1.5 uppercase">
-                      <Award className="w-3.5 h-3.5" /> {t.pd.verdict}
-                    </p>
-                    <p className="text-sm font-medium mt-1">{currentOutcome?.verdict}</p>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row gap-4 pt-4">
-                    <button
-                      onClick={resetGame}
-                      className="flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-xl bg-slate-800 hover:bg-slate-700 border border-border-main text-sm font-semibold transition-all cursor-pointer"
-                    >
-                      <Play className="w-4 h-4 rotate-180" /> {t.pd.play_again}
-                    </button>
-                    <a
-                      href="#theory-section"
-                      className="flex-1 flex items-center justify-center py-3 px-6 rounded-xl bg-primary-main hover:bg-primary-main/90 text-white text-sm font-semibold shadow-lg shadow-primary-main/20 transition-all cursor-pointer"
-                    >
-                      {t.pd.explore_theory}
-                    </a>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
-
-        {/* Matrix Visualization */}
-        <div className="lg:col-span-5 space-y-6">
-          <div className="bg-bg-card border border-border-main rounded-2xl p-6 shadow-xl">
-            <h3 className="text-lg font-bold mb-4 font-outfit text-text-main flex items-center gap-2">
-              <HelpCircle className="w-5 h-5 text-secondary-main" /> {t.pd.matrix_title}
-            </h3>
-            <p className="text-xs text-text-muted mb-4">
-              {t.pd.matrix_desc}
+      {/* 1. Opponent Select Screen */}
+      {!opponent && (
+        <motion.div
+          initial={{ opacity: 0, y: 15 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="space-y-8"
+        >
+          <div className="text-center max-w-2xl mx-auto space-y-3">
+            <h2 className="text-3xl font-extrabold font-outfit text-text-main flex items-center justify-center gap-2">
+              <Users className="w-8 h-8 text-primary-main" /> {t.pd.select_opponent}
+            </h2>
+            <p className="text-sm text-text-muted leading-relaxed">
+              {t.pd.select_opponent_sub}
             </p>
+          </div>
 
-            {/* Matrix table structure */}
-            <div className="relative overflow-x-auto select-none mt-4">
-              <table className="w-full text-center border-collapse">
-                <thead>
-                  <tr>
-                    <th className="p-2 w-1/4"></th>
-                    <th className="p-2 w-3/8 text-xs font-bold text-text-muted uppercase bg-slate-800/20 light:bg-slate-100/50 rounded-t-xl" colSpan={2}>
-                      {t.pd.partner_side}
-                    </th>
-                  </tr>
-                  <tr className="border-b border-border-main/30">
-                    <th className="p-2 w-1/4 text-[10px] text-text-muted uppercase">{t.pd.your_strategy}</th>
-                    <th className="p-3 w-3/8 text-xs font-semibold text-emerald-400">{t.pd.silent_btn}</th>
-                    <th className="p-3 w-3/8 text-xs font-semibold text-red-400">{t.pd.betray_btn}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {/* Row 1: Silent */}
-                  <tr>
-                    <td className="p-3 text-xs font-semibold text-emerald-400 border-r border-border-main/30 text-left">
-                      {t.pd.silent_btn}
-                    </td>
-                    {/* Silent-Silent Cell */}
-                    <td
-                      className={`p-4 border border-border-main/30 transition-all rounded-lg ${
-                        (choice === 'Silent' && partnerChoice === 'Silent') ||
-                        (hoveredCell?.row === 'Silent' && hoveredCell?.col === 'Silent')
-                          ? 'bg-emerald-500/20 scale-[1.02] shadow-md border-emerald-500/60'
-                          : 'bg-slate-800/10 hover:bg-slate-800/30'
-                      }`}
-                    >
-                      <div className="text-xs font-bold text-white dark:text-white light:text-slate-900">1 {t.pd.sentences.year}</div>
-                      <div className="text-[10px] text-text-muted">1 {t.pd.sentences.year}</div>
-                    </td>
-                    {/* Silent-Betray Cell */}
-                    <td
-                      className={`p-4 border border-border-main/30 transition-all rounded-lg ${
-                        (choice === 'Silent' && partnerChoice === 'Betray') ||
-                        (hoveredCell?.row === 'Silent' && hoveredCell?.col === 'Betray')
-                          ? 'bg-red-500/20 scale-[1.02] shadow-md border-red-500/60'
-                          : 'bg-slate-800/10 hover:bg-slate-800/30'
-                      }`}
-                    >
-                      <div className="text-xs font-bold text-white dark:text-white light:text-slate-900">10 {t.pd.sentences.years}</div>
-                      <div className="text-[10px] text-text-muted">0 {t.pd.sentences.years}</div>
-                    </td>
-                  </tr>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {botStrategiesList.map((bot, index) => (
+              <motion.div
+                key={bot.id}
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.05 }}
+                className="bg-bg-card border border-border-main hover:border-primary-main/40 rounded-2xl p-6 shadow-md hover:shadow-xl transition-all flex flex-col justify-between"
+              >
+                <div className="space-y-4">
+                  <div className="w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center text-2xl border border-border-main">
+                    {bot.icon}
+                  </div>
+                  <div className="space-y-1.5">
+                    <h3 className="text-lg font-bold font-outfit text-text-main">{bot.name}</h3>
+                    <p className="text-xs text-text-muted leading-relaxed">{bot.desc}</p>
+                  </div>
+                </div>
 
-                  {/* Row 2: Betray */}
-                  <tr>
-                    <td className="p-3 text-xs font-semibold text-red-400 border-r border-border-main/30 text-left">
-                      {t.pd.betray_btn}
-                    </td>
-                    {/* Betray-Silent Cell */}
-                    <td
-                      className={`p-4 border border-border-main/30 transition-all rounded-lg ${
-                        (choice === 'Betray' && partnerChoice === 'Silent') ||
-                        (hoveredCell?.row === 'Betray' && hoveredCell?.col === 'Silent')
-                          ? 'bg-emerald-500/20 scale-[1.02] shadow-md border-emerald-500/60'
-                          : 'bg-slate-800/10 hover:bg-slate-800/30'
-                      }`}
-                    >
-                      <div className="text-xs font-bold text-white dark:text-white light:text-slate-900">0 {t.pd.sentences.years}</div>
-                      <div className="text-[10px] text-text-muted">10 {t.pd.sentences.years}</div>
-                    </td>
-                    {/* Betray-Betray Cell */}
-                    <td
-                      className={`p-4 border border-border-main/30 transition-all rounded-lg ${
-                        (choice === 'Betray' && partnerChoice === 'Betray') ||
-                        (hoveredCell?.row === 'Betray' && hoveredCell?.col === 'Betray')
-                          ? 'bg-red-500/20 scale-[1.02] shadow-md border-red-500/60'
-                          : 'bg-slate-800/10 hover:bg-slate-800/30'
-                      }`}
-                    >
-                      <div className="text-xs font-bold text-white dark:text-white light:text-slate-900">5 {t.pd.sentences.years}</div>
-                      <div className="text-[10px] text-text-muted">5 {t.pd.sentences.years}</div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                <div className="pt-6">
+                  <button
+                    onClick={() => setOpponent(bot.id)}
+                    className="w-full py-2.5 px-4 bg-primary-main hover:bg-primary-main/90 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-primary-main/15 cursor-pointer"
+                  >
+                    {language === 'en' ? 'Select Strategy' : 'Stratejiyi Seç'}
+                  </button>
+                </div>
+              </motion.div>
+            ))}
+          </div>
+        </motion.div>
+      )}
+
+      {/* 2. Match Play Screen */}
+      {opponent && !showLeaderboard && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          {/* Active Playboard */}
+          <div className="lg:col-span-7 space-y-6">
+            <div className="bg-bg-card border border-border-main rounded-2xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-64 h-64 bg-primary-main/5 rounded-full filter blur-3xl pointer-events-none" />
+
+              <div className="flex justify-between items-start mb-6 pb-4 border-b border-border-main/50">
+                <div>
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-primary-main/10 text-primary-main border border-primary-main/20">
+                    {t.dashboard.games.pd_title}
+                  </span>
+                  <span className="text-xs text-text-muted ml-3">{t.pd.diff}</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs font-bold bg-slate-800 px-3 py-1 rounded-full border border-slate-700/60">
+                  <span>{t.pd.round} {isPlaying ? round : 10} / 10</span>
+                </div>
+              </div>
+
+              {/* Story/Play Board */}
+              <AnimatePresence mode="wait">
+                {isPlaying ? (
+                  <motion.div
+                    key="active-round"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="space-y-6"
+                  >
+                    <div className="flex items-center gap-3 bg-slate-900/40 p-4 rounded-xl border border-border-main/50">
+                      <div className="w-10 h-10 rounded-lg bg-slate-800 flex items-center justify-center text-xl">
+                        {currentBotDetails?.icon}
+                      </div>
+                      <div>
+                        <h4 className="text-xs text-text-muted">{language === 'en' ? 'Playing against' : 'Oynanan rakip'}:</h4>
+                        <p className="text-sm font-bold text-text-main">{currentBotDetails?.name}</p>
+                      </div>
+                    </div>
+
+                    {/* Last Round Log Bubble */}
+                    {lastRoundResult && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="p-4 bg-slate-800/40 light:bg-slate-100/50 rounded-xl border border-border-main/80 space-y-1.5"
+                      >
+                        <h4 className="text-xs font-bold text-accent-main">{lastRoundResult.title}</h4>
+                        <p className="text-xs text-text-muted leading-relaxed">{lastRoundResult.desc}</p>
+                        <div className="flex gap-4 pt-1.5 text-[10px] font-bold text-text-main border-t border-border-main/30">
+                          <span>{language === 'en' ? 'You earned' : 'Kazandığınız'}: <strong className="text-emerald-400">+{lastRoundResult.userPts} {t.pd.score}</strong></span>
+                          <span>{language === 'en' ? 'Bot earned' : 'Botun kazandığı'}: <strong className="text-emerald-400">+{lastRoundResult.botPts} {t.pd.score}</strong></span>
+                        </div>
+                      </motion.div>
+                    )}
+
+                    <div className="pt-4 border-t border-border-main/50 space-y-3">
+                      <p className="text-sm font-semibold text-text-main">{t.pd.choice_prompt}</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <button
+                          onClick={() => handlePlayRound('Silent')}
+                          className="flex flex-col items-center justify-center p-5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 hover:border-emerald-500/40 text-emerald-400 font-semibold transition-all group cursor-pointer"
+                        >
+                          <Shield className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform" />
+                          <span>{t.pd.silent_btn}</span>
+                          <span className="text-[10px] text-emerald-500/70 font-normal mt-1">{t.pd.silent_sub}</span>
+                        </button>
+
+                        <button
+                          onClick={() => handlePlayRound('Betray')}
+                          className="flex flex-col items-center justify-center p-5 rounded-xl border border-red-500/20 bg-red-500/5 hover:bg-red-500/10 hover:border-red-500/40 text-red-400 font-semibold transition-all group cursor-pointer"
+                        >
+                          <AlertTriangle className="w-8 h-8 mb-2 group-hover:scale-110 transition-transform" />
+                          <span>{t.pd.betray_btn}</span>
+                          <span className="text-[10px] text-red-500/70 font-normal mt-1">{t.pd.betray_sub}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="match-over"
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="space-y-6 text-center py-6"
+                  >
+                    <div className="w-16 h-16 rounded-full bg-accent-main/10 flex items-center justify-center text-4xl text-accent-main mx-auto border border-accent-main/20 animate-bounce">
+                      🏁
+                    </div>
+                    <div className="space-y-2">
+                      <h3 className="text-2xl font-extrabold font-outfit text-text-main">{t.pd.game_over}</h3>
+                      <p className="text-xs text-text-muted max-w-md mx-auto">
+                        {language === 'en'
+                          ? `You completed the 10-round match against ${currentBotDetails?.name}. Let's see the final scores:`
+                          : `${currentBotDetails?.name} botuna karşı 10 rauntluk maç bitti. Sonuçlar:`}
+                      </p>
+                    </div>
+
+                    {/* Final Receipts Card */}
+                    <div className="grid grid-cols-2 gap-4 max-w-md mx-auto">
+                      <div className="p-4 bg-slate-800/40 light:bg-slate-100 rounded-xl border border-border-main text-center">
+                        <p className="text-xs text-text-muted uppercase tracking-wider font-semibold">{language === 'en' ? 'Your Score' : 'Sizin Skorunuz'}</p>
+                        <p className="text-3xl font-extrabold text-white dark:text-white light:text-slate-900 mt-1">
+                          {userScore} <span className="text-xs text-text-muted">{t.pd.score}</span>
+                        </p>
+                      </div>
+                      <div className="p-4 bg-slate-800/40 light:bg-slate-100 rounded-xl border border-border-main text-center">
+                        <p className="text-xs text-text-muted uppercase tracking-wider font-semibold">
+                          {language === 'en' ? "Rival's Score" : 'Rakibin Skoru'}
+                        </p>
+                        <p className="text-3xl font-extrabold text-white dark:text-white light:text-slate-900 mt-1">
+                          {botScore} <span className="text-xs text-text-muted">{t.pd.score}</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-4 pt-6 max-w-md mx-auto">
+                      <button
+                        onClick={resetAll}
+                        className="flex-1 flex items-center justify-center gap-2 py-3.5 px-6 rounded-xl bg-slate-800 hover:bg-slate-700 border border-border-main text-sm font-semibold transition-all cursor-pointer"
+                      >
+                        <RefreshCw className="w-4 h-4" /> {language === 'en' ? 'Replay Bot' : 'Yeniden Oyna'}
+                      </button>
+                      <button
+                        onClick={runAxelrodTournament}
+                        className="flex-1 flex items-center justify-center gap-2 py-3.5 px-6 rounded-xl bg-primary-main hover:bg-primary-main/90 text-white text-sm font-semibold shadow-lg shadow-primary-main/20 transition-all cursor-pointer"
+                      >
+                        🚀 {t.pd.run_tournament}
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+
+          {/* Right Side: Scoreboard Tracker & History */}
+          <div className="lg:col-span-5 space-y-6">
+            {/* Live Scores Panel */}
+            <div className="bg-bg-card border border-border-main rounded-2xl p-6 shadow-xl space-y-4">
+              <h3 className="text-lg font-bold font-outfit text-text-main">{language === 'en' ? 'Live Match Standings' : 'Anlık Maç Durumu'}</h3>
+              
+              <div className="space-y-3.5">
+                <div>
+                  <div className="flex justify-between text-xs font-semibold mb-1">
+                    <span>{language === 'en' ? 'You' : 'Siz'} (🤝/😈)</span>
+                    <span className="text-primary-main">{userScore} {t.pd.score}</span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                    <div className="h-full bg-primary-main rounded-full transition-all duration-300" style={{ width: `${Math.min((userScore / 50) * 100, 100)}%` }} />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs font-semibold mb-1">
+                    <span>{currentBotDetails?.name}</span>
+                    <span className="text-accent-main">{botScore} {t.pd.score}</span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                    <div className="h-full bg-accent-main rounded-full transition-all duration-300" style={{ width: `${Math.min((botScore / 50) * 100, 100)}%` }} />
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div className="mt-4 p-3 bg-slate-800/40 light:bg-slate-100 rounded-lg text-[10px] text-text-muted flex justify-between">
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-2.5 bg-emerald-500/20 border border-emerald-500/50 rounded-sm" />
-                {t.pd.coop_zone}
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-2.5 bg-red-500/20 border border-red-500/50 rounded-sm" />
-                {t.pd.nash_zone}
-              </span>
+            {/* Timelines History Tracker */}
+            <div className="bg-bg-card border border-border-main rounded-2xl p-6 shadow-xl space-y-4">
+              <h3 className="text-sm font-bold font-outfit text-text-main uppercase tracking-wider text-text-muted">{t.pd.history}</h3>
+
+              <div className="space-y-4 max-h-[180px] overflow-y-auto pr-1">
+                {roundsLog.length === 0 ? (
+                  <p className="text-xs text-text-muted italic">{language === 'en' ? 'Make a move to start log.' : 'Kayıt başlatmak için hamle yapın.'}</p>
+                ) : (
+                  roundsLog.map((log, index) => (
+                    <div key={index} className="flex justify-between items-center text-xs p-2.5 bg-slate-900/30 rounded-lg border border-border-main/50">
+                      <span className="font-semibold text-text-muted">{t.pd.round} {index + 1}</span>
+                      <div className="flex items-center gap-4">
+                        <span className="flex items-center gap-1">
+                          <span className="text-[10px] text-text-muted">You:</span>
+                          <strong>{log.userMove === 'Silent' ? '🤝' : '😈'}</strong>
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="text-[10px] text-text-muted">Bot:</span>
+                          <strong>{log.botMove === 'Silent' ? '🤝' : '😈'}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Learning Accordion Section */}
+      {/* 3. Tournament Leaderboard Screen (Axelrod chart replica) */}
+      {showLeaderboard && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.98 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="space-y-8"
+        >
+          <div className="bg-bg-card border border-border-main rounded-2xl p-6 sm:p-8 shadow-xl relative overflow-hidden space-y-8">
+            <div className="space-y-2 pb-4 border-b border-border-main/50 flex justify-between items-start">
+              <div>
+                <h2 className="text-2xl font-extrabold font-outfit text-text-main">{t.pd.leaderboard_title}</h2>
+                <p className="text-xs text-text-muted leading-relaxed mt-1 max-w-xl">
+                  {t.pd.leaderboard_sub}
+                </p>
+              </div>
+              <button
+                onClick={resetAll}
+                className="flex items-center gap-2 py-2 px-4 bg-slate-800 hover:bg-slate-700 border border-border-main text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                <RefreshCw className="w-4.5 h-4.5" /> {language === 'en' ? 'New Match' : 'Yeni Maç'}
+              </button>
+            </div>
+
+            {/* Colored horizontal bar chart (matching uploaded screenshot) */}
+            <div className="space-y-4 max-w-4xl mx-auto select-none">
+              {/* Header Titles */}
+              <div className="grid grid-cols-12 text-xs font-bold text-text-muted uppercase tracking-wider pb-2 border-b border-border-main/30">
+                <span className="col-span-1 text-center">{t.pd.rank}</span>
+                <span className="col-span-3 text-left">{t.pd.player}</span>
+                <span className="col-span-2 text-center">{t.pd.avg_score}</span>
+                <span className="col-span-6 text-left pl-4">Relative Score (0 - 500)</span>
+              </div>
+
+              {/* Iterated Scores Bars */}
+              {leaderboardData.map((player, idx) => {
+                const rankNum = String(idx + 1).padStart(2, '0');
+                
+                // Percent width of chart bar (scaled to 500 max score)
+                const percentWidth = Math.min((player.score / 500) * 100, 100);
+
+                return (
+                  <motion.div
+                    key={idx}
+                    initial={{ width: 0 }}
+                    animate={{ width: '100%' }}
+                    transition={{ duration: 0.5, delay: idx * 0.1 }}
+                    className="grid grid-cols-12 items-center text-xs py-1 transition-all"
+                  >
+                    {/* Rank */}
+                    <span className="col-span-1 text-center font-bold text-text-muted">{rankNum}</span>
+
+                    {/* Bot/User Name */}
+                    <span className={`col-span-3 text-left font-bold truncate pr-2 ${player.isUser ? 'text-primary-main' : 'text-text-main'}`}>
+                      {player.name}
+                    </span>
+
+                    {/* Average Score */}
+                    <span className="col-span-2 text-center font-bold text-text-main bg-slate-900/60 light:bg-slate-200/50 py-1.5 rounded-lg border border-border-main/40">
+                      {player.score}
+                    </span>
+
+                    {/* Score Bar Chart representation */}
+                    <div className="col-span-6 pl-4 flex items-center h-full">
+                      <div className="w-full h-7 bg-slate-800/40 rounded-md border border-slate-700/30 overflow-hidden relative flex items-center">
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${percentWidth}%` }}
+                          transition={{ duration: 0.8, ease: 'easeOut' }}
+                          className={`h-full ${player.color} rounded-r shadow-md`}
+                        />
+                      </div>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* 4. Learning Accordion Section (Theory blocks remain below play space) */}
       <div id="theory-section" className="mt-12 space-y-6 scroll-mt-24">
         <div className="border-b border-border-main/50 pb-3 flex items-center justify-between">
           <h2 className="text-2xl font-extrabold font-outfit text-text-main">{t.pd.what_happened}</h2>

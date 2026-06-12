@@ -69,7 +69,7 @@ export default function Home() {
             <Globe className="w-4.5 h-4.5" />
             <span className="uppercase">{language}</span>
           </button>
-          
+
           <button
             onClick={toggleTheme}
             className="p-2 rounded-xl hover:bg-slate-800/80 light:hover:bg-slate-200/80 border border-transparent hover:border-border-main transition-all cursor-pointer"
